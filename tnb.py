@@ -32,6 +32,7 @@ import statistics
 import struct
 import subprocess
 import sys
+import threading
 import time
 import types as _types
 from dataclasses import dataclass, field
@@ -380,158 +381,269 @@ class RunConfig:
     debounce: int
 
 
-def run_measurement(cfg: RunConfig) -> TripTracker:
+class MeasureSession:
+    """État d'une campagne de mesure, alimentée trame par trame.
+
+    Découplée de la capture réseau : utilisable depuis la boucle socket, depuis
+    le serveur web (thread) ou depuis les tests (trames synthétiques)."""
+
+    def __init__(self, cfg: RunConfig, on_event=None):
+        self.cfg = cfg
+        self.detector = FaultDetector(cfg.model, debounce=cfg.debounce)
+        self.tracker = TripTracker(cfg.gocb_refs, cfg.trip_bool_index, cfg.trip_timeout)
+        self.shot_index = 0
+        self.on_event = on_event
+        self.log: List[str] = []
+        self.t_start: Optional[float] = None
+
+    def _emit(self, msg: str) -> None:
+        self.log.append(msg)
+        if self.on_event:
+            self.on_event(msg)
+
+    def feed(self, etype: Optional[int], payload: bytes, ts: float) -> None:
+        if etype == ETH_P_SV:
+            for s in parse_sv_phaseA(payload):
+                if self.cfg.svid_filter and s.svid != self.cfg.svid_filter:
+                    continue
+                ev = self.detector.feed(s)
+                if ev == "onset":
+                    self.shot_index += 1
+                    self.tracker.on_fault_onset(self.shot_index, ts)
+                    self._emit(f"Tir #{self.shot_index} : défaut SV "
+                               f"(svID={s.svid}, smpCnt={s.smp_cnt}) à T0={ts:.6f}")
+                elif ev == "clear":
+                    self._close_shot()
+                    self.tracker.on_fault_clear()
+        elif etype == ETH_P_GOOSE:
+            self._feed_goose(payload, ts)
+
+    def _feed_goose(self, payload: bytes, ts: float) -> None:
+        if len(payload) < 8:
+            return
+        app_id = int.from_bytes(payload[0:2], "big")
+        length = int.from_bytes(payload[2:4], "big")
+        if self.cfg.goose_appid is not None and app_id != self.cfg.goose_appid:
+            return
+        apdu = payload[8:length] if 8 < length <= len(payload) else payload[8:]
+        try:
+            pdu = decode_goose_pdu(apdu)
+        except Exception:
+            return
+        cur = self.tracker.current
+        had = cur is not None and pdu.gocb_ref in cur.trips
+        self.tracker.on_goose(pdu.gocb_ref, pdu.st_num, pdu.all_data, ts)
+        cur = self.tracker.current
+        if cur is not None and not had and pdu.gocb_ref in cur.trips:
+            lat = (cur.trips[pdu.gocb_ref] - cur.t0) * 1e3
+            self._emit(f"    VIED {pdu.gocb_ref} : trip à +{lat:.3f} ms (tir #{cur.index})")
+
+    def _close_shot(self) -> None:
+        shot = self.tracker.current
+        if shot is None:
+            return
+        for ref in (self.tracker.expected_refs or self.tracker.seen_refs):
+            if ref not in shot.trips:
+                self._emit(f"    VIED {ref} : AUCUN trip (timeout, tir #{shot.index})")
+
+    def finalize(self) -> None:
+        if self.tracker.current is not None:
+            self._close_shot()
+            self.tracker.on_fault_clear()
+
+    def is_done(self) -> bool:
+        return (bool(self.cfg.num_shots)
+                and self.shot_index >= self.cfg.num_shots
+                and self.tracker.current is None)
+
+
+def _capture_loop(cfg: RunConfig, session: MeasureSession,
+                  stop_event: threading.Event) -> None:
+    """Boucle de capture brute alimentant `session` jusqu'à arrêt/fin/durée."""
     sock = _open_capture(cfg.iface)
-    detector = FaultDetector(cfg.model, debounce=cfg.debounce)
-    tracker = TripTracker(cfg.gocb_refs, cfg.trip_bool_index, cfg.trip_timeout)
-
-    shot_index = 0
-    t_start = time.clock_gettime(time.CLOCK_REALTIME)
-    stop = {"flag": False}
-
-    def _on_sigint(_sig, _frm):
-        stop["flag"] = True
-    old_handler = signal.signal(signal.SIGINT, _on_sigint)
-
-    print(f"[TNB] Capture sur {cfg.iface} — SV svID={cfg.svid_filter or '*'}, "
-          f"GOOSE appid={'*' if cfg.goose_appid is None else hex(cfg.goose_appid)}, "
-          f"VIED={cfg.gocb_refs or 'auto'}")
-    print("[TNB] En attente des défauts SV... (Ctrl+C pour arrêter)\n")
-
+    sock.settimeout(0.5)
+    session.t_start = time.clock_gettime(time.CLOCK_REALTIME)
     try:
-        while not stop["flag"]:
-            if cfg.num_shots and shot_index >= cfg.num_shots and tracker.current is None:
+        while not stop_event.is_set():
+            if session.is_done():
                 break
-            if cfg.duration is not None:
-                if time.clock_gettime(time.CLOCK_REALTIME) - t_start >= cfg.duration:
-                    break
+            if cfg.duration is not None and \
+                    time.clock_gettime(time.CLOCK_REALTIME) - session.t_start >= cfg.duration:
+                break
             try:
                 data, ancdata, _flags, _addr = sock.recvmsg(2048, 256)
-            except (BlockingIOError, InterruptedError):
+            except (BlockingIOError, InterruptedError, socket.timeout):
                 continue
             ts = _kernel_ts(ancdata)
             if ts is None:
                 ts = time.clock_gettime(time.CLOCK_REALTIME)
-
             etype, payload = _ethertype_and_payload(data)
-            if etype == ETH_P_SV:
-                for s in parse_sv_phaseA(payload):
-                    if cfg.svid_filter and s.svid != cfg.svid_filter:
-                        continue
-                    event = detector.feed(s)
-                    if event == "onset":
-                        shot_index += 1
-                        tracker.on_fault_onset(shot_index, ts)
-                        print(f"[TNB] Tir #{shot_index}: défaut SV détecté "
-                              f"(svID={s.svid}, smpCnt={s.smp_cnt}) à T0={ts:.6f}")
-                    elif event == "clear":
-                        _close_shot(tracker)
-                        tracker.on_fault_clear()
-            elif etype == ETH_P_GOOSE:
-                _handle_goose(payload, ts, cfg, tracker)
+            session.feed(etype, payload, ts)
     finally:
-        signal.signal(signal.SIGINT, old_handler)
         sock.close()
-
-    # Tir éventuellement encore ouvert en fin de capture.
-    if tracker.current is not None:
-        _close_shot(tracker)
-    return tracker
+        session.finalize()
 
 
-def _handle_goose(payload: bytes, ts: float, cfg: RunConfig, tracker: TripTracker) -> None:
-    if len(payload) < 8:
-        return
-    app_id = int.from_bytes(payload[0:2], "big")
-    length = int.from_bytes(payload[2:4], "big")
-    if cfg.goose_appid is not None and app_id != cfg.goose_appid:
-        return
-    apdu = payload[8:length] if 8 < length <= len(payload) else payload[8:]
+def run_measurement(cfg: RunConfig, on_event=print) -> TripTracker:
+    """Lance une campagne (CLI) : SIGINT pour arrêter. Retourne le tracker."""
+    session = MeasureSession(cfg, on_event=on_event)
+    stop_event = threading.Event()
+    old = None
     try:
-        pdu = decode_goose_pdu(apdu)
-    except Exception:
-        return
-    tracker.on_goose(pdu.gocb_ref, pdu.st_num, pdu.all_data, ts)
+        old = signal.signal(signal.SIGINT, lambda *_a: stop_event.set())
+    except ValueError:
+        old = None  # pas dans le thread principal
+    if on_event:
+        on_event(f"[TNB] Capture sur {cfg.iface} — SV svID={cfg.svid_filter or '*'}, "
+                 f"GOOSE appid={'*' if cfg.goose_appid is None else hex(cfg.goose_appid)}, "
+                 f"VIED={cfg.gocb_refs or 'auto'} (Ctrl+C pour arrêter)")
+    try:
+        _capture_loop(cfg, session, stop_event)
+    finally:
+        if old is not None:
+            signal.signal(signal.SIGINT, old)
+    return session.tracker
 
 
-def _close_shot(tracker: TripTracker) -> None:
-    """Affiche le résultat du tir courant au moment où le défaut se résorbe."""
-    shot = tracker.current
-    if shot is None:
-        return
-    refs = tracker.expected_refs or tracker.seen_refs
-    for ref in refs:
-        if ref in shot.trips:
-            lat_ms = (shot.trips[ref] - shot.t0) * 1e3
-            print(f"        VIED {ref}: trip à +{lat_ms:.3f} ms")
-        else:
-            print(f"        VIED {ref}: AUCUN trip (timeout)")
+# --------------------------------------------------------------------------- #
+# Scan : GOOSE (et svID SV) transitant sur l'interface
+# --------------------------------------------------------------------------- #
+def scan_traffic(iface: str, duration: float = 5.0,
+                 stop_event: Optional[threading.Event] = None) -> dict:
+    """Écoute `duration` secondes et inventorie les GOOSE et flux SV vus.
+
+    GOOSE indexés par (gocbRef, appID, src_mac) ; SV par (svID, appID, src_mac)."""
+    sock = _open_capture(iface)
+    sock.settimeout(0.5)
+    goose: Dict[Tuple[str, int, str], dict] = {}
+    sv: Dict[Tuple[str, int, str], dict] = {}
+    t_end = time.clock_gettime(time.CLOCK_REALTIME) + duration
+    try:
+        while time.clock_gettime(time.CLOCK_REALTIME) < t_end:
+            if stop_event is not None and stop_event.is_set():
+                break
+            try:
+                data, _anc, _f, _a = sock.recvmsg(2048, 256)
+            except (BlockingIOError, InterruptedError, socket.timeout):
+                continue
+            src_mac = ":".join(f"{b:02x}" for b in data[6:12]) if len(data) >= 12 else "?"
+            dst_mac = ":".join(f"{b:02x}" for b in data[0:6]) if len(data) >= 6 else "?"
+            etype, payload = _ethertype_and_payload(data)
+            if etype == ETH_P_GOOSE and len(payload) >= 8:
+                app_id = int.from_bytes(payload[0:2], "big")
+                length = int.from_bytes(payload[2:4], "big")
+                apdu = payload[8:length] if 8 < length <= len(payload) else payload[8:]
+                try:
+                    pdu = decode_goose_pdu(apdu)
+                except Exception:
+                    continue
+                key = (pdu.gocb_ref, app_id, src_mac)
+                ent = goose.setdefault(key, {
+                    "gocb_ref": pdu.gocb_ref, "go_id": pdu.go_id, "app_id": app_id,
+                    "src_mac": src_mac, "dst_mac": dst_mac, "dat_set": pdu.dat_set,
+                    "conf_rev": pdu.conf_rev, "count": 0,
+                    "st_num": pdu.st_num, "sq_num": pdu.sq_num,
+                    "num_entries": pdu.num_dat_set_entries,
+                })
+                ent["count"] += 1
+                ent["st_num"] = pdu.st_num
+                ent["sq_num"] = pdu.sq_num
+            elif etype == ETH_P_SV and len(payload) >= 8:
+                app_id = int.from_bytes(payload[0:2], "big")
+                for s in parse_sv_phaseA(payload):
+                    key = (s.svid, app_id, src_mac)
+                    ent = sv.setdefault(key, {
+                        "svid": s.svid, "app_id": app_id, "src_mac": src_mac,
+                        "dst_mac": dst_mac, "count": 0, "last_smp_cnt": s.smp_cnt,
+                    })
+                    ent["count"] += 1
+                    ent["last_smp_cnt"] = s.smp_cnt
+    finally:
+        sock.close()
+    return {
+        "goose": sorted(goose.values(), key=lambda e: (-e["count"], e["gocb_ref"])),
+        "sv": sorted(sv.values(), key=lambda e: (-e["count"], e["svid"])),
+    }
 
 
 # --------------------------------------------------------------------------- #
 # Statistiques et verdict
 # --------------------------------------------------------------------------- #
-def report(tracker: TripTracker, max_latency_ms: Optional[float],
-           csv_path: Optional[str]) -> bool:
+def compute_stats(tracker: TripTracker, max_latency_ms: Optional[float]) -> dict:
+    """Agrège le tracker en un dict JSON-sérialisable (CLI + serveur web)."""
     refs = tracker.expected_refs or tracker.seen_refs
     n_shots = len(tracker.shots)
-    print("\n" + "=" * 60)
-    print(f"TNB — {n_shots} tir(s), {len(refs)} VIED")
-    print("=" * 60)
-
+    vieds: List[dict] = []
+    rows: List[dict] = []
     all_ok = True
-    rows: List[Tuple[str, int, float]] = []   # (gocbRef, shot_index, latence_ms)
     for ref in refs:
         lats: List[float] = []
         for shot in tracker.shots:
             if ref in shot.trips:
                 lat_ms = (shot.trips[ref] - shot.t0) * 1e3
                 lats.append(lat_ms)
-                rows.append((ref, shot.index, lat_ms))
+                rows.append({"gocb_ref": ref, "shot": shot.index, "latency_ms": lat_ms})
             else:
-                rows.append((ref, shot.index, float("nan")))
+                rows.append({"gocb_ref": ref, "shot": shot.index, "latency_ms": None})
         success = len(lats)
-        rate = (success / n_shots * 100.0) if n_shots else 0.0
-        print(f"\nVIED {ref}")
-        if lats:
-            mn, mx = min(lats), max(lats)
-            mean = statistics.fmean(lats)
-            std = statistics.pstdev(lats) if len(lats) > 1 else 0.0
-            print(f"  tirs réussis : {success}/{n_shots} ({rate:.0f} %)")
-            print(f"  latence (ms) : min={mn:.3f}  moy={mean:.3f}  "
-                  f"max={mx:.3f}  σ={std:.3f}")
-        else:
-            print(f"  tirs réussis : 0/{n_shots} — aucun trip détecté")
-        # Verdict
         ref_ok = (success == n_shots and n_shots > 0)
-        if max_latency_ms is not None and lats:
-            if max(lats) > max_latency_ms:
-                ref_ok = False
-        verdict = "PASS" if ref_ok else "FAIL"
-        if max_latency_ms is not None:
-            print(f"  verdict      : {verdict} "
-                  f"(seuil ≤ {max_latency_ms:.3f} ms, 100 % de réussite requis)")
-        else:
-            print(f"  verdict      : {verdict} (100 % de réussite requis)")
+        if max_latency_ms is not None and lats and max(lats) > max_latency_ms:
+            ref_ok = False
         all_ok = all_ok and ref_ok
+        vieds.append({
+            "gocb_ref": ref,
+            "success": success,
+            "total": n_shots,
+            "rate": (success / n_shots * 100.0) if n_shots else 0.0,
+            "min": min(lats) if lats else None,
+            "mean": statistics.fmean(lats) if lats else None,
+            "max": max(lats) if lats else None,
+            "std": statistics.pstdev(lats) if len(lats) > 1 else (0.0 if lats else None),
+            "verdict": ref_ok,
+        })
+    return {
+        "n_shots": n_shots,
+        "max_latency_ms": max_latency_ms,
+        "vieds": vieds,
+        "rows": rows,
+        "global_pass": all_ok and n_shots > 0,
+    }
 
-    if csv_path:
-        _write_csv(csv_path, rows)
-        print(f"\n[TNB] Détail écrit dans {csv_path}")
 
+def report(tracker: TripTracker, max_latency_ms: Optional[float],
+           csv_path: Optional[str]) -> bool:
+    st = compute_stats(tracker, max_latency_ms)
     print("\n" + "=" * 60)
-    print(f"VERDICT GLOBAL TNB : {'PASS' if all_ok else 'FAIL'}")
+    print(f"TNB — {st['n_shots']} tir(s), {len(st['vieds'])} VIED")
     print("=" * 60)
-    return all_ok
+    for v in st["vieds"]:
+        print(f"\nVIED {v['gocb_ref']}")
+        if v["success"]:
+            print(f"  tirs réussis : {v['success']}/{v['total']} ({v['rate']:.0f} %)")
+            print(f"  latence (ms) : min={v['min']:.3f}  moy={v['mean']:.3f}  "
+                  f"max={v['max']:.3f}  σ={v['std']:.3f}")
+        else:
+            print(f"  tirs réussis : 0/{v['total']} — aucun trip détecté")
+        seuil = (f"seuil ≤ {max_latency_ms:.3f} ms, " if max_latency_ms is not None else "")
+        print(f"  verdict      : {'PASS' if v['verdict'] else 'FAIL'} "
+              f"({seuil}100 % de réussite requis)")
+    if csv_path:
+        _write_csv(csv_path, st["rows"])
+        print(f"\n[TNB] Détail écrit dans {csv_path}")
+    print("\n" + "=" * 60)
+    print(f"VERDICT GLOBAL TNB : {'PASS' if st['global_pass'] else 'FAIL'}")
+    print("=" * 60)
+    return st["global_pass"]
 
 
-def _write_csv(path: str, rows: List[Tuple[str, int, float]]) -> None:
+def _write_csv(path: str, rows: List[dict]) -> None:
     import csv
     with open(path, "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(["gocb_ref", "shot_index", "latency_ms"])
-        for ref, idx, lat in rows:
-            w.writerow([ref, idx, "" if math.isnan(lat) else f"{lat:.6f}"])
+        for r in rows:
+            lat = r["latency_ms"]
+            w.writerow([r["gocb_ref"], r["shot"], "" if lat is None else f"{lat:.6f}"])
 
 
 # --------------------------------------------------------------------------- #

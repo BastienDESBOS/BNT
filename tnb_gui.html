@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TNB — Test Nominal de Base</title>
+<style>
+  :root {
+    --bg:#1a1b26; --surface:#24283b; --surface2:#1f2335; --text:#c0caf5;
+    --muted:#565f89; --accent:#7aa2f7; --danger:#f7768e; --success:#9ece6a;
+    --warn:#e0af68;
+  }
+  *{box-sizing:border-box}
+  body{background:var(--bg);color:var(--text);font-family:system-ui,sans-serif;margin:0;padding:1rem 1.5rem}
+  h1{font-size:1.4rem;color:var(--accent);margin:0 0 .25rem}
+  h2{font-size:1rem;color:var(--muted);margin:1rem 0 .5rem;text-transform:uppercase;letter-spacing:.05em}
+  .sub{color:var(--muted);font-size:.85rem;margin-bottom:1rem}
+  .grid{display:grid;grid-template-columns:minmax(360px,1fr) minmax(360px,1.2fr);gap:1.25rem;align-items:start}
+  .card{background:var(--surface);border-radius:10px;padding:1rem 1.1rem;margin-bottom:1rem}
+  label{display:block;font-size:.8rem;color:var(--muted);margin:.55rem 0 .15rem}
+  input,select,textarea{width:100%;padding:.4rem .55rem;background:var(--surface2);border:1px solid var(--muted);
+    border-radius:6px;color:var(--text);font-family:inherit;font-size:.9rem}
+  input:focus,select:focus,textarea:focus{outline:none;border-color:var(--accent)}
+  textarea{height:3.4rem;font-family:ui-monospace,monospace;font-size:.82rem}
+  .row{display:grid;grid-template-columns:1fr 1fr;gap:.5rem}
+  .row3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:.5rem}
+  .btn{padding:.45rem .9rem;border:none;border-radius:6px;font-family:inherit;font-size:.88rem;cursor:pointer;font-weight:600}
+  .btn--accent{background:var(--accent);color:var(--bg)} .btn--danger{background:var(--danger);color:var(--bg)}
+  .btn--ghost{background:transparent;color:var(--text);border:1px solid var(--muted)}
+  .btn:disabled{opacity:.45;cursor:not-allowed}
+  .toolbar{display:flex;gap:.5rem;flex-wrap:wrap;align-items:center;margin-top:.75rem}
+  .chk{display:flex;align-items:center;gap:.4rem;margin:.6rem 0}
+  .chk input{width:auto}
+  table{width:100%;border-collapse:collapse;font-size:.85rem;margin-top:.4rem}
+  th,td{padding:.35rem .5rem;text-align:left;border-bottom:1px solid rgba(255,255,255,.06)}
+  th{color:var(--muted);font-weight:600}
+  .badge{display:inline-block;padding:.15rem .55rem;border-radius:6px;font-weight:700;font-size:.85rem}
+  .pass{background:var(--success);color:var(--bg)} .fail{background:var(--danger);color:var(--bg)}
+  .dot{display:inline-block;width:.6rem;height:.6rem;border-radius:50%;margin-right:.4rem;vertical-align:middle}
+  .dot.on{background:var(--success);box-shadow:0 0 6px var(--success)} .dot.off{background:var(--muted)}
+  .log{background:#11121a;border-radius:6px;padding:.5rem .6rem;height:180px;overflow:auto;font-family:ui-monospace,monospace;
+    font-size:.78rem;white-space:pre-wrap;color:#a9b1d6}
+  .scanrow{cursor:pointer} .scanrow:hover{background:rgba(122,162,247,.12)}
+  .stat{display:flex;gap:1.5rem;flex-wrap:wrap;margin:.4rem 0}
+  .stat b{color:var(--accent);font-size:1.1rem}
+  .err{color:var(--danger);font-size:.85rem;min-height:1rem}
+  .hint{color:var(--muted);font-size:.75rem;margin-top:.15rem}
+</style>
+</head>
+<body>
+  <h1>TNB — Test Nominal de Base</h1>
+  <div class="sub">Mesure de latence flux SV → trip GOOSE (deux VIED). <span id="conn"></span></div>
+
+  <div class="grid">
+    <!-- ============ COLONNE GAUCHE : CONFIGURATION ============ -->
+    <div>
+      <div class="card">
+        <h2>Profils</h2>
+        <div class="row">
+          <select id="profileSel"><option value="">— charger un profil —</option></select>
+          <div class="toolbar" style="margin:0">
+            <button class="btn btn--ghost" onclick="loadProfile()">Charger</button>
+            <button class="btn btn--ghost" onclick="deleteProfile()">Supprimer</button>
+          </div>
+        </div>
+        <div class="row" style="margin-top:.5rem">
+          <input id="profileName" placeholder="nom du profil">
+          <button class="btn btn--accent" onclick="saveProfile()">Enregistrer le profil</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Interface & flux SV sain attendu</h2>
+        <label>Interface réseau</label>
+        <input id="iface" list="dl-iface" placeholder="ex: processbus">
+        <div class="row3">
+          <div><label>svID (filtre)</label><input id="svid" list="dl-svid" placeholder="tous"></div>
+          <div><label>Fréquence (Hz)</label><input id="freq" type="number" value="50"></div>
+          <div><label>Déphasage (°)</label><input id="phase" type="number" value="0"></div>
+        </div>
+        <div class="row3">
+          <div><label>I crête sain (A)</label><input id="i_peak" type="number" value="10"></div>
+          <div><label>V crête sain (V)</label><input id="v_peak" type="number" value="100"></div>
+          <div><label>Seuil défaut (×ampl.)</label><input id="thr_factor" type="number" step="0.1" value="0.5"></div>
+        </div>
+        <div class="hint">Le flux sain attendu doit correspondre à l'émission, pour détecter le défaut.</div>
+      </div>
+
+      <div class="card">
+        <h2>GOOSE / VIED</h2>
+        <label>gocbRef des VIED (un par ligne)</label>
+        <textarea id="gocb_refs" placeholder="VIED1/LLN0$GO$gcbTrip&#10;VIED2/LLN0$GO$gcbTrip"></textarea>
+        <div class="hint">Vide = auto-découverte (tous les VIED vus sont reportés).</div>
+        <div class="row3">
+          <div><label>APPID GOOSE</label><input id="goose_appid" list="dl-gappid" placeholder="0x3000"></div>
+          <div><label>Index booléen trip</label><input id="trip_bool_index" type="number" placeholder="stNum"></div>
+          <div><label>Timeout trip (ms)</label><input id="trip_timeout_ms" type="number" value="500"></div>
+        </div>
+        <div class="toolbar">
+          <input id="scanDur" type="number" value="5" style="width:5rem" title="durée scan (s)">
+          <button class="btn btn--ghost" id="scanBtn" onclick="scan()">Scanner les GOOSE / SV</button>
+        </div>
+        <div id="scanOut"></div>
+      </div>
+
+      <div class="card">
+        <h2>Campagne</h2>
+        <div class="row3">
+          <div><label>Nombre de tirs (0=∞)</label><input id="shots" type="number" value="10"></div>
+          <div><label>Durée max (s)</label><input id="duration" type="number" placeholder="—"></div>
+          <div><label>Seuil latence (ms)</label><input id="max_latency_ms" type="number" placeholder="—"></div>
+        </div>
+        <label>Anti-rebond (échantillons)</label>
+        <input id="debounce" type="number" value="2" style="width:6rem">
+      </div>
+
+      <div class="card">
+        <h2>Génération SV (optionnelle)</h2>
+        <div class="chk"><input type="checkbox" id="generate"><label style="margin:0">Émettre le flux SV via rt_sender</label></div>
+        <label>Chemin rt_sender</label>
+        <input id="rt_sender" value="./po/rt_sender">
+        <div class="row">
+          <div><label>MAC source</label><input id="src_mac" list="dl-srcmac" value="01:0c:cd:04:00:01"></div>
+          <div><label>MAC destination</label><input id="dst_mac" list="dl-dstmac" value="01:0c:cd:04:00:02"></div>
+        </div>
+        <div class="row3">
+          <div><label>APPID SV</label><input id="sv_appid" list="dl-svappid" value="0x4000"></div>
+          <div><label>confRev</label><input id="sv_conf_rev" value="1"></div>
+          <div><label>fault-cycle (s)</label><input id="fault_cycle" type="number" value="2"></div>
+        </div>
+        <div class="row3">
+          <div><label>défaut I crête (A)</label><input id="fault_i_peak" type="number" value="0"></div>
+          <div><label>défaut V crête (V)</label><input id="fault_v_peak" type="number" value="0"></div>
+          <div><label>défaut phase (°)</label><input id="fault_phase" type="number" value="0"></div>
+        </div>
+        <div class="row">
+          <div><label>VLAN id</label><input id="vlan_id" type="number" placeholder="—"></div>
+          <div><label>VLAN priorité</label><input id="vlan_priority" type="number" value="4"></div>
+        </div>
+      </div>
+
+      <div class="toolbar">
+        <button class="btn btn--accent" id="startBtn" onclick="start()">▶ Démarrer le TNB</button>
+        <button class="btn btn--danger" id="stopBtn" onclick="stop()" disabled>■ Arrêter</button>
+      </div>
+      <div class="err" id="formErr"></div>
+    </div>
+
+    <!-- ============ COLONNE DROITE : LIVE & RÉSULTATS ============ -->
+    <div>
+      <div class="card">
+        <h2>État</h2>
+        <div class="stat">
+          <div><span class="dot off" id="runDot"></span><span id="runState">à l'arrêt</span></div>
+          <div>écoulé : <b id="elapsed">0</b> s</div>
+          <div>tirs : <b id="shotCount">0</b></div>
+        </div>
+        <div class="err" id="jobErr"></div>
+      </div>
+
+      <div class="card">
+        <h2>Résultats <span id="globalVerdict"></span></h2>
+        <div id="resultsTable"><div class="hint">Aucun résultat pour l'instant.</div></div>
+        <div class="toolbar">
+          <button class="btn btn--ghost" onclick="exportCsv()">Exporter CSV</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Journal en direct</h2>
+        <div class="log" id="log"></div>
+      </div>
+    </div>
+  </div>
+
+  <datalist id="dl-iface"></datalist>
+  <datalist id="dl-svid"></datalist>
+  <datalist id="dl-gappid"></datalist>
+  <datalist id="dl-svappid"></datalist>
+  <datalist id="dl-srcmac"></datalist>
+  <datalist id="dl-dstmac"></datalist>
+
+<script>
+const $ = id => document.getElementById(id);
+const NUM = ["freq","phase","i_peak","v_peak","thr_factor","trip_timeout_ms","shots",
+             "duration","max_latency_ms","debounce","fault_i_peak","fault_v_peak",
+             "fault_phase","fault_cycle","vlan_priority","trip_bool_index","vlan_id"];
+const TXT = ["iface","svid","goose_appid","rt_sender","src_mac","dst_mac","sv_appid","sv_conf_rev"];
+let lastResults = null;
+
+function gatherConfig(){
+  const c = {};
+  TXT.forEach(k => c[k] = $(k).value.trim());
+  NUM.forEach(k => { const v = $(k).value.trim(); if(v!=="") c[k] = Number(v); });
+  c.generate = $("generate").checked;
+  c.gocb_refs = $("gocb_refs").value.split("\n").map(s=>s.trim()).filter(Boolean);
+  return c;
+}
+function applyConfig(c){
+  TXT.forEach(k => { if(c[k]!==undefined) $(k).value = c[k]; });
+  NUM.forEach(k => { if(c[k]!==undefined && c[k]!==null) $(k).value = c[k]; });
+  $("generate").checked = !!c.generate;
+  if(c.gocb_refs) $("gocb_refs").value = c.gocb_refs.join("\n");
+}
+
+async function api(method, path, body){
+  const opt = {method, headers:{}};
+  if(body!==undefined){ opt.headers["Content-Type"]="application/json"; opt.body=JSON.stringify(body); }
+  const r = await fetch(path, opt);
+  return r.json();
+}
+
+function fillDatalist(id, vals){
+  const dl = $(id); if(!dl) return;
+  dl.innerHTML = (vals||[]).map(v=>`<option value="${String(v).replace(/"/g,'&quot;')}">`).join("");
+}
+
+async function loadStore(){
+  const s = await api("GET","/api/store");
+  const h = s.history||{};
+  fillDatalist("dl-iface", h.iface);
+  fillDatalist("dl-svid", h.svid);
+  fillDatalist("dl-gappid", h.goose_appid);
+  fillDatalist("dl-svappid", h.sv_appid);
+  fillDatalist("dl-srcmac", h.src_mac);
+  fillDatalist("dl-dstmac", h.dst_mac);
+  const sel = $("profileSel");
+  const names = Object.keys(s.profiles||{});
+  sel.innerHTML = '<option value="">— charger un profil —</option>' +
+    names.map(n=>`<option value="${n}">${n}</option>`).join("");
+  window._profiles = s.profiles||{};
+}
+
+async function start(){
+  $("formErr").textContent = "";
+  const r = await api("POST","/api/start",{config:gatherConfig()});
+  if(!r.ok){ $("formErr").textContent = r.error||"échec démarrage"; return; }
+  loadStore();
+  poll();
+}
+async function stop(){ await api("POST","/api/stop"); }
+
+async function saveProfile(){
+  const name = $("profileName").value.trim();
+  if(!name){ $("formErr").textContent="Donnez un nom de profil."; return; }
+  await api("POST","/api/profiles",{name, config:gatherConfig()});
+  $("profileName").value=""; loadStore();
+}
+function loadProfile(){
+  const n = $("profileSel").value; if(!n) return;
+  applyConfig((window._profiles||{})[n]||{});
+}
+async function deleteProfile(){
+  const n = $("profileSel").value; if(!n) return;
+  await api("DELETE","/api/profiles/"+encodeURIComponent(n)); loadStore();
+}
+
+async function scan(){
+  const iface = $("iface").value.trim();
+  if(!iface){ $("formErr").textContent="Renseignez l'interface avant de scanner."; return; }
+  $("scanBtn").disabled = true; $("scanBtn").textContent="Scan en cours…";
+  const r = await api("POST","/api/scan",{iface, duration:Number($("scanDur").value)||5});
+  $("scanBtn").disabled = false; $("scanBtn").textContent="Scanner les GOOSE / SV";
+  if(!r.ok){ $("scanOut").innerHTML = `<div class="err">${r.error}</div>`; return; }
+  renderScan(r); loadStore();
+}
+function renderScan(r){
+  let html = "";
+  if(r.goose && r.goose.length){
+    html += `<table><tr><th>GOOSE gocbRef</th><th>goID</th><th>APPID</th><th>stNum</th><th>n</th></tr>`;
+    r.goose.forEach(g=>{
+      html += `<tr class="scanrow" onclick='addRef(${JSON.stringify(g.gocb_ref)}, ${g.app_id})'>
+        <td>${esc(g.gocb_ref)}</td><td>${esc(g.go_id||"")}</td>
+        <td>0x${g.app_id.toString(16)}</td><td>${g.st_num}</td><td>${g.count}</td></tr>`;
+    });
+    html += `</table><div class="hint">Cliquez une ligne GOOSE pour l'ajouter comme VIED (+ APPID).</div>`;
+  } else html += `<div class="hint">Aucun GOOSE vu.</div>`;
+  if(r.sv && r.sv.length){
+    html += `<table style="margin-top:.6rem"><tr><th>SV svID</th><th>APPID</th><th>src</th><th>n</th></tr>`;
+    r.sv.forEach(s=>{
+      html += `<tr class="scanrow" onclick='setSvid(${JSON.stringify(s.svid)})'>
+        <td>${esc(s.svid)}</td><td>0x${s.app_id.toString(16)}</td><td>${esc(s.src_mac)}</td><td>${s.count}</td></tr>`;
+    });
+    html += `</table><div class="hint">Cliquez une ligne SV pour fixer le svID.</div>`;
+  }
+  $("scanOut").innerHTML = html;
+}
+function addRef(ref, appid){
+  const ta = $("gocb_refs");
+  const refs = ta.value.split("\n").map(s=>s.trim()).filter(Boolean);
+  if(!refs.includes(ref)){ refs.push(ref); ta.value = refs.join("\n"); }
+  if(appid!==undefined && !$("goose_appid").value) $("goose_appid").value = "0x"+appid.toString(16);
+}
+function setSvid(s){ $("svid").value = s; }
+
+function esc(s){ return String(s).replace(/[&<>]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+function fmt(x){ return x==null ? "—" : x.toFixed(3); }
+
+function renderResults(res){
+  lastResults = res;
+  const gv = $("globalVerdict");
+  if(!res || !res.n_shots){ gv.innerHTML=""; $("resultsTable").innerHTML='<div class="hint">Aucun résultat pour l\'instant.</div>'; return; }
+  gv.innerHTML = res.global_pass ? '<span class="badge pass">PASS</span>' : '<span class="badge fail">FAIL</span>';
+  let html = `<table><tr><th>VIED (gocbRef)</th><th>réussite</th><th>min</th><th>moy</th><th>max</th><th>σ</th><th>verdict</th></tr>`;
+  res.vieds.forEach(v=>{
+    html += `<tr><td>${esc(v.gocb_ref)}</td><td>${v.success}/${v.total} (${v.rate.toFixed(0)}%)</td>
+      <td>${fmt(v.min)}</td><td>${fmt(v.mean)}</td><td>${fmt(v.max)}</td><td>${fmt(v.std)}</td>
+      <td><span class="badge ${v.verdict?'pass':'fail'}">${v.verdict?'PASS':'FAIL'}</span></td></tr>`;
+  });
+  html += `</table><div class="hint">Latences en ms.</div>`;
+  $("resultsTable").innerHTML = html;
+}
+
+function exportCsv(){
+  if(!lastResults || !lastResults.rows || !lastResults.rows.length){ return; }
+  let csv = "gocb_ref,shot,latency_ms\n";
+  lastResults.rows.forEach(r=>{ csv += `${r.gocb_ref},${r.shot},${r.latency_ms==null?"":r.latency_ms.toFixed(6)}\n`; });
+  const blob = new Blob([csv],{type:"text/csv"});
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob); a.download = "tnb_resultats.csv"; a.click();
+}
+
+let polling = false;
+async function poll(){
+  if(polling) return; polling = true;
+  try{
+    const s = await api("GET","/api/state");
+    $("runDot").className = "dot " + (s.running ? "on":"off");
+    $("runState").textContent = s.running ? "en cours" : (s.shots ? "terminé" : "à l'arrêt");
+    $("elapsed").textContent = s.elapsed ?? 0;
+    $("shotCount").textContent = s.shots ?? 0;
+    $("jobErr").textContent = s.error || "";
+    $("startBtn").disabled = !!s.running;
+    $("stopBtn").disabled = !s.running;
+    $("log").textContent = (s.log||[]).join("\n");
+    $("log").scrollTop = $("log").scrollHeight;
+    renderResults(s.results);
+    $("conn").textContent = "";
+  }catch(e){
+    $("conn").innerHTML = '<span style="color:var(--danger)">serveur injoignable</span>';
+  }finally{ polling = false; }
+}
+
+loadStore();
+poll();
+setInterval(poll, 1000);
+</script>
+</body>
+</html>

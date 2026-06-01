@@ -3,12 +3,28 @@
 Mesure de latence d'une chaîne de protection IEC 61850 virtualisée (deux VIED) :
 **flux SV avec défaut → trip GOOSE en retour**, sur un même hôte.
 
-- `tnb.py` — l'utilitaire (capture + détection + statistiques + verdict).
+- `tnb.py` — l'utilitaire CLI (capture + détection + statistiques + verdict).
+- `tnb_server.py` + `tnb_gui.html` — **interface web d'administration** (démarrer/
+  arrêter, suivi en direct, résultats + verdict, profils mémorisés, scan GOOSE/SV).
 - `tnb_test.py` — tests hors-ligne (aucun réseau ni privilège requis) :
   `python3 tnb_test.py`.
 - `po/` — sous-module [insatomcat/po](https://github.com/insatomcat/po) :
   plateforme IEC 61850 fournissant le générateur SV (`rt_sender`) et le décodeur
   GOOSE pur (`goose61850`, `iec_data`) réutilisés ici.
+
+## Interface web
+
+```bash
+sudo python3 tnb_server.py --port 7060      # capture/émission => privilèges réseau
+# puis ouvrir http://localhost:7060
+```
+
+La GUI permet de : configurer et **démarrer/arrêter** une campagne, suivre l'état
+**en direct** (tirs, journal, latences), voir les **résultats par VIED + verdict**,
+**exporter en CSV**, **enregistrer des profils** de paramètres, et **scanner** le
+trafic pour lister les GOOSE/SV transitant (clic = pré-remplissage du formulaire).
+Les valeurs déjà saisies (svID, gocbRef, MAC, APPID…) sont mémorisées et
+proposées en auto-complétion (`tnb_store.json`).
 
 ## Installation
 

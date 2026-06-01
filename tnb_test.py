@@ -229,6 +229,62 @@ def test_bool_index_trigger() -> None:
           "trip sur booléen True à 10 ms")
 
 
+def _make_cfg(refs):
+    return tnb.RunConfig(
+        iface="x", model=tnb.FaultModel(50, 10, 100, 0, 0.5),
+        svid_filter=None, goose_appid=None, gocb_refs=refs,
+        trip_bool_index=None, trip_timeout=0.5, num_shots=0,
+        duration=None, debounce=2,
+    )
+
+
+def test_session_feed_e2e() -> None:
+    print("test_session_feed_e2e (chemin MeasureSession.feed, comme le serveur)")
+    refs = ["IED1/LLN0$GO$gcb", "IED2/LLN0$GO$gcb"]
+    sess = tnb.MeasureSession(_make_cfg(refs))
+
+    # Repos GOOSE : établit la base de stNum pour les deux VIED.
+    for r in refs:
+        sess.feed(tnb.ETH_P_GOOSE, make_goose_payload(0x3000, r, 1, 0, trip=False), 100.0)
+    # Défaut : un payload SV = 2 ASDU => anti-rebond satisfait => onset à T0.
+    # smpCnt=200 (hors passage par zéro) pour un écart franc sur les 2 échantillons.
+    sess.feed(tnb.ETH_P_SV, make_sv_payload("SV", 200, 50, 10, 100, 0,
+                                            fault=True, fault_i=200, fault_v=5), 101.0)
+    check(sess.shot_index == 1, "un tir armé sur le front de défaut")
+    # Trips GOOSE (stNum incrémenté).
+    sess.feed(tnb.ETH_P_GOOSE, make_goose_payload(0x3000, refs[0], 2, 1, trip=True), 101.008)
+    sess.feed(tnb.ETH_P_GOOSE, make_goose_payload(0x3000, refs[1], 2, 1, trip=True), 101.012)
+    # Retour au sain.
+    sess.feed(tnb.ETH_P_SV, make_sv_payload("SV", 100, 50, 10, 100, 0, fault=False), 102.0)
+    sess.finalize()
+
+    shot = sess.tracker.shots[0]
+    check(abs((shot.trips[refs[0]] - shot.t0) * 1e3 - 8.0) < 1e-3, "latence VIED1 ≈ 8 ms")
+    check(abs((shot.trips[refs[1]] - shot.t0) * 1e3 - 12.0) < 1e-3, "latence VIED2 ≈ 12 ms")
+
+
+def test_compute_stats_and_verdict() -> None:
+    print("test_compute_stats_and_verdict")
+    refs = ["A", "B"]
+    tr = tnb.TripTracker(gocb_refs=refs, trip_bool_index=None, trip_timeout=1.0)
+    tr.on_fault_onset(1, 0.0)
+    tr.on_goose("A", 2, [BoolData(True)], 0.008)
+    tr.on_goose("B", 2, [BoolData(True)], 0.012)
+    tr.on_fault_clear()
+
+    st = tnb.compute_stats(tr, max_latency_ms=50.0)
+    check(st["n_shots"] == 1, "1 tir comptabilisé")
+    check(st["global_pass"] is True, "verdict global PASS sous seuil 50 ms")
+    by = {v["gocb_ref"]: v for v in st["vieds"]}
+    check(abs(by["A"]["mean"] - 8.0) < 1e-3, "moyenne A = 8 ms")
+
+    st2 = tnb.compute_stats(tr, max_latency_ms=10.0)
+    by2 = {v["gocb_ref"]: v for v in st2["vieds"]}
+    check(by2["A"]["verdict"] is True and by2["B"]["verdict"] is False,
+          "seuil 10 ms : A PASS, B FAIL")
+    check(st2["global_pass"] is False, "verdict global FAIL si un VIED dépasse")
+
+
 def main() -> int:
     for fn in (
         test_sv_parse_and_detect,
@@ -237,6 +293,8 @@ def main() -> int:
         test_end_to_end_latency,
         test_timeout_miss,
         test_bool_index_trigger,
+        test_session_feed_e2e,
+        test_compute_stats_and_verdict,
     ):
         fn()
     print()
