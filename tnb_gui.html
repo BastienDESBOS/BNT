@@ -126,7 +126,13 @@
         <div class="row3">
           <div><label>APPID SV</label><input id="sv_appid" list="dl-svappid" value="0x4000"></div>
           <div><label>confRev</label><input id="sv_conf_rev" value="1"></div>
+          <div><label>smpSynch (0/1/2)</label><input id="smp_synch" type="number" value="2"></div>
+        </div>
+        <div class="hint">smpSynch : 2=Global (synchronisé) — requis par la plupart des protections.
+          confRev : doit correspondre à la config SCL du vIED (ex. 20000).</div>
+        <div class="row">
           <div><label>fault-cycle (s)</label><input id="fault_cycle" type="number" value="2"></div>
+          <div></div>
         </div>
         <div class="row3">
           <div><label>défaut I crête (A)</label><input id="fault_i_peak" type="number" value="0"></div>
@@ -198,7 +204,7 @@
 const $ = id => document.getElementById(id);
 const NUM = ["freq","phase","i_peak","v_peak","thr_factor","trip_timeout_ms","shots",
              "duration","max_latency_ms","debounce","fault_i_peak","fault_v_peak",
-             "fault_phase","fault_cycle","vlan_priority","vlan_id"];
+             "fault_phase","fault_cycle","vlan_priority","vlan_id","smp_synch"];
 const TXT = ["iface","svid","goose_appid","rt_sender","src_mac","dst_mac","sv_appid","sv_conf_rev"];
 let lastResults = null;
 let vieds = [];            // [{ref, member}]  (member = "" => stNum)

@@ -179,6 +179,7 @@ def spawn_generator(c: Dict[str, Any]) -> Optional["subprocess.Popen"]:
         "--fault-cycle", str(c.get("fault_cycle", 2)),
         "--appid", str(c.get("sv_appid", "0x4000")),
         "--conf-rev", str(c.get("sv_conf_rev", 1)),
+        "--smp-synch", str(c.get("smp_synch", 2)),
     ]
     if c.get("vlan_id") not in (None, ""):
         cmd += ["--vlan-id", str(c["vlan_id"]), "--vlan-priority", str(c.get("vlan_priority", 4))]
