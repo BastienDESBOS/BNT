@@ -754,6 +754,7 @@ def spawn_rt_sender(args: argparse.Namespace) -> Optional[subprocess.Popen]:
         "--appid", str(args.sv_appid),
         "--conf-rev", str(args.sv_conf_rev),
         "--smp-synch", str(args.sv_smp_synch),
+        "--format", str(args.sv_format),
     ]
     if args.vlan_id is not None:
         cmd += ["--vlan-id", str(args.vlan_id), "--vlan-priority", str(args.vlan_priority)]
@@ -810,6 +811,8 @@ def build_parser() -> argparse.ArgumentParser:
     g_gen.add_argument("--sv-conf-rev", default="1")
     g_gen.add_argument("--sv-smp-synch", default="2",
                        help="smpSynch émis : 0=None, 1=Local, 2=Global (défaut)")
+    g_gen.add_argument("--sv-format", default="6i3u", choices=["6i3u", "4i4u"],
+                       help="Format seqData émis : 6i3u (défaut) ou 4i4u")
     g_gen.add_argument("--fault-i-peak", type=float, default=0.0)
     g_gen.add_argument("--fault-v-peak", type=float, default=0.0)
     g_gen.add_argument("--fault-phase", type=float, default=0.0)

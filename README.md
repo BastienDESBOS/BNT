@@ -76,8 +76,29 @@ décodeur GOOSE pur du dépôt `po` (`goose61850.codec`) est réutilisé.
 
 - Tourner sur le **même hôte** que le contrôle-commande (horloge unique).
 - Privilèges réseau : `sudo` ou `CAP_NET_RAW` (capture `AF_PACKET`).
-- Compiler le générateur SV si on veut que `tnb.py` l'émette :
-  `cc -O2 -o po/rt_sender po/svgenerator/rt_sender.c -lm`
+- Compiler le **générateur SV** (`sender/`, dérivé de `po` + option de format) :
+  ```bash
+  make -C sender          # produit sender/rt_sender
+  ```
+
+### Format du flux SV (6I3U vs 4I4U)
+
+Le dataset SV n'est pas le même selon les départs ; le format **doit correspondre**
+à celui que le vIED attend (voir le SCD) :
+- **6I3U** (6 courants + 3 tensions, 72 o) — c'est le format d'origine de `po` ;
+- **4I4U** (4 courants Ia,Ib,Ic,In + 4 tensions Ua,Ub,Uc,Un, 64 o) — requis p.ex.
+  par les départs dont le dataset est `4×TCTR + 4×TVTR`.
+
+Réglable dans la GUI (« Format SV ») ou en CLI (`--sv-format 4i4u|6i3u`). La **mesure**
+détecte les deux automatiquement (phase A = voie 0 ; tension phase A = voie 4 en
+4I4U, voie 6 en 6I3U).
+
+**Vérifier le flux émis sans rien envoyer** (`--dump` imprime le 1er paquet en hex) :
+```bash
+sender/rt_sender --format 4i4u --appid 0x4030 --conf-rev 20000 --smp-synch 2 --dump \
+  lo 01:0c:cd:04:00:01 01:0c:cd:04:00:30 LDTM1_SVI_DEP3
+# attendu : ... 87 40 ...  (0x40 = 64 octets de seqData => 4I4U)
+```
 
 ## Exemples
 
@@ -85,8 +106,8 @@ décodeur GOOSE pur du dépôt `po` (`goose61850.codec`) est réutilisé.
 
 ```bash
 sudo python3 tnb.py processbus \
-  --rt-sender ./po/rt_sender --svid SV_TNB \
-  --sv-appid 0x4000 --sv-conf-rev 1 \
+  --rt-sender ./sender/rt_sender --svid SV_TNB \
+  --sv-appid 0x4000 --sv-conf-rev 1 --sv-smp-synch 2 --sv-format 6i3u \
   --src-mac 01:0c:cd:04:00:01 --dst-mac 01:0c:cd:04:00:02 \
   --freq 50 --i-peak 10 --v-peak 100 \
   --fault-i-peak 200 --fault-v-peak 5 --fault-cycle 2 \

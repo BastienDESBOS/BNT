@@ -117,8 +117,15 @@
       <div class="card">
         <h2>Génération SV (optionnelle)</h2>
         <div class="chk"><input type="checkbox" id="generate"><label style="margin:0">Émettre le flux SV via rt_sender</label></div>
-        <label>Chemin rt_sender</label>
-        <input id="rt_sender" value="./po/rt_sender">
+        <div class="row">
+          <div><label>Chemin rt_sender</label><input id="rt_sender" value="./sender/rt_sender"></div>
+          <div><label>Format SV</label>
+            <select id="sv_format">
+              <option value="6i3u">6I3U — 6 courants + 3 tensions (ex. DEP5/6)</option>
+              <option value="4i4u">4I4U — 4 courants + 4 tensions (ex. DEP1-4)</option>
+            </select></div>
+        </div>
+        <div class="hint">Le format doit correspondre au dataset SV du vIED (voir le SCD/SCD).</div>
         <div class="row">
           <div><label>MAC source</label><input id="src_mac" list="dl-srcmac" value="01:0c:cd:04:00:01"></div>
           <div><label>MAC destination</label><input id="dst_mac" list="dl-dstmac" value="01:0c:cd:04:00:02"></div>
@@ -205,7 +212,7 @@ const $ = id => document.getElementById(id);
 const NUM = ["freq","phase","i_peak","v_peak","thr_factor","trip_timeout_ms","shots",
              "duration","max_latency_ms","debounce","fault_i_peak","fault_v_peak",
              "fault_phase","fault_cycle","vlan_priority","vlan_id","smp_synch"];
-const TXT = ["iface","svid","goose_appid","rt_sender","src_mac","dst_mac","sv_appid","sv_conf_rev"];
+const TXT = ["iface","svid","goose_appid","rt_sender","src_mac","dst_mac","sv_appid","sv_conf_rev","sv_format"];
 let lastResults = null;
 let vieds = [];            // [{ref, member}]  (member = "" => stNum)
 window._members = {};      // gocbRef -> [{index,label,bool}] (issus du scan)

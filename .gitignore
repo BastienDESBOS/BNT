@@ -2,5 +2,6 @@ __pycache__/
 *.pyc
 *.csv
 po/rt_sender
+sender/rt_sender
 tnb_store.json
 *.tmp

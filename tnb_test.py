@@ -305,6 +305,21 @@ def test_compute_stats_and_verdict() -> None:
     check(st2["global_pass"] is False, "verdict global FAIL si un VIED dépasse")
 
 
+def test_parse_4i4u_and_6i3u() -> None:
+    print("test_parse_4i4u_and_6i3u (phase A extraite des deux formats)")
+    def ch(v):
+        return struct.pack("!i", v) + b"\x00\x00\x00\x00"
+    # 4I4U : Ia,Ib,Ic,In, Ua,Ub,Uc,Un  -> Va en voie 4 (64 octets)
+    seq4 = b"".join(ch(x) for x in [2588, -9659, 7071, 0, 12000, -6000, -6000, 0])
+    ia, va = tnb._phaseA_from_seqdata(seq4)
+    check(len(seq4) == 64, "seqData 4I4U = 64 octets")
+    check(abs(ia - 2.588) < 1e-6 and abs(va - 120.0) < 1e-6, "4I4U : Ia voie 0, Va voie 4")
+    # 6I3U : Ia,Ib,Ic,Ires,In,Ih, Ua,Ub,Uc -> Va en voie 6 (72 octets)
+    seq6 = b"".join(ch(x) for x in [2588, -9659, 7071, 0, 0, 0, 12000, -6000, -6000])
+    ia6, va6 = tnb._phaseA_from_seqdata(seq6)
+    check(len(seq6) == 72 and abs(va6 - 120.0) < 1e-6, "6I3U : Va voie 6")
+
+
 def test_per_vied_member() -> None:
     print("test_per_vied_member (DO/DA de trip choisi par VIED)")
     refs = ["X", "Y"]
@@ -337,6 +352,7 @@ def main() -> int:
         test_bool_index_trigger,
         test_session_feed_e2e,
         test_compute_stats_and_verdict,
+        test_parse_4i4u_and_6i3u,
         test_per_vied_member,
     ):
         fn()
