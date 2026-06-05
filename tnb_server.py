@@ -186,7 +186,9 @@ def spawn_generator(c: Dict[str, Any]) -> Optional["subprocess.Popen"]:
         cmd += ["--vlan-id", str(c["vlan_id"]), "--vlan-priority", str(c.get("vlan_priority", 4))]
     cmd += [c["iface"], c.get("src_mac", "01:0c:cd:04:00:01"),
             c.get("dst_mac", "01:0c:cd:04:00:02"), c.get("svid") or "SV_TNB"]
-    return subprocess.Popen(cmd)
+    # On capture stderr de rt_sender pour le remonter dans le journal (bannière +
+    # erreurs : option inconnue, mauvais MAC, échec d'émission, format, etc.).
+    return subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -210,7 +212,25 @@ class Job:
             self._gen = spawn_generator(self.config)
         except Exception as e:  # noqa: BLE001
             self.session.log.append(f"[gen] échec démarrage rt_sender: {e}")
+        if self._gen is not None:
+            cmd = "rt_sender " + " ".join(self._gen.args[1:]) if hasattr(self._gen, "args") else "rt_sender"
+            self.session.log.append(f"[gen] démarrage : {cmd}")
+            threading.Thread(target=self._pump_gen, daemon=True).start()
         self.thread.start()
+
+    def _pump_gen(self) -> None:
+        """Remonte la sortie d'erreur de rt_sender (bannière + erreurs) au journal."""
+        p = self._gen
+        try:
+            if p is not None and p.stderr is not None:
+                for line in p.stderr:
+                    line = line.rstrip()
+                    if line:
+                        self.session.log.append(f"[gen] {line}")
+        except Exception:  # noqa: BLE001
+            pass
+        if p is not None:
+            self.session.log.append(f"[gen] rt_sender arrêté (code {p.poll()})")
 
     def _run(self) -> None:
         try:
