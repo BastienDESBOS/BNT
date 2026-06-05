@@ -193,7 +193,9 @@
       </div>
 
       <div class="card">
-        <h2>Journal en direct</h2>
+        <h2>Journal en direct
+          <button class="btn btn--ghost" id="copyLogBtn" style="font-size:.75rem;padding:.2rem .55rem;margin-left:.5rem" onclick="copyLog()">Copier</button>
+        </h2>
         <div class="log" id="log"></div>
       </div>
     </div>
@@ -443,6 +445,44 @@ function drawHist(res){
 }
 async function pollScope(){ try{ drawScope(await api("GET","/api/scope")); }catch(e){} }
 
+// ---- Journal : MAJ non destructive + copie presse-papier ----
+window._lastLog = "";
+function selectionInLog(){
+  const sel = window.getSelection();
+  if(!sel || sel.rangeCount===0 || sel.isCollapsed) return false;
+  const el = $("log");
+  return (sel.anchorNode && el.contains(sel.anchorNode)) ||
+         (sel.focusNode && el.contains(sel.focusNode));
+}
+function updateLog(lines){
+  const txt = lines.join("\n");
+  window._lastLog = txt;
+  if(selectionInLog()) return;            // ne pas casser une sélection en cours
+  const el = $("log");
+  if(el.textContent === txt) return;      // rien de neuf, on ne touche pas au DOM
+  const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
+  el.textContent = txt;
+  if(atBottom) el.scrollTop = el.scrollHeight;
+}
+function flashCopied(){
+  const b = $("copyLogBtn"); if(!b) return;
+  const old = b.textContent; b.textContent = "Copié ✓";
+  setTimeout(()=>{ b.textContent = old; }, 1200);
+}
+function copyLog(){
+  const txt = window._lastLog || $("log").textContent || "";
+  if(navigator.clipboard && navigator.clipboard.writeText){
+    navigator.clipboard.writeText(txt).then(flashCopied, ()=>fallbackCopy(txt));
+  } else { fallbackCopy(txt); }
+}
+function fallbackCopy(txt){
+  const ta = document.createElement("textarea");
+  ta.value = txt; ta.style.position = "fixed"; ta.style.opacity = "0";
+  document.body.appendChild(ta); ta.select();
+  try{ document.execCommand("copy"); }catch(e){}
+  document.body.removeChild(ta); flashCopied();
+}
+
 let polling = false;
 async function poll(){
   if(polling) return; polling = true;
@@ -455,8 +495,7 @@ async function poll(){
     $("jobErr").textContent = s.error || "";
     $("startBtn").disabled = !!s.running;
     $("stopBtn").disabled = !s.running;
-    $("log").textContent = (s.log||[]).join("\n");
-    $("log").scrollTop = $("log").scrollHeight;
+    updateLog(s.log || []);
     renderResults(s.results);
     $("conn").textContent = "";
   }catch(e){
