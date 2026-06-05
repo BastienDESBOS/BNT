@@ -24,6 +24,7 @@ dépendre de scapy : la capture se fait avec un socket AF_PACKET maison.
 from __future__ import annotations
 
 import argparse
+import collections
 import math
 import os
 import signal
@@ -223,42 +224,66 @@ class FaultModel:
         va = self.v_peak * math.sin(ph)
         return ia, va
 
-    def is_fault(self, s: SvSample) -> bool:
+    def residual(self, s: SvSample) -> float:
+        """Écart instantané phase A vs sain attendu, normalisé par l'amplitude crête.
+
+        On prend le max des écarts courant/tension. 0 = conforme, >0 = anomalie."""
         ia_exp, va_exp = self.expected(s.smp_cnt)
-        # Référence d'écart : l'amplitude crête (avec un plancher pour le mode zéro).
-        thr_i = self.thr_factor * max(self.i_peak, 1e-6)
-        thr_v = self.thr_factor * max(self.v_peak, 1e-6)
-        if abs(s.ia - ia_exp) > thr_i:
-            return True
-        if abs(s.va - va_exp) > thr_v:
-            return True
-        return False
+        ri = abs(s.ia - ia_exp) / max(self.i_peak, 1e-6)
+        rv = abs(s.va - va_exp) / max(self.v_peak, 1e-6)
+        return max(ri, rv)
+
+    def cycle_samples(self) -> int:
+        """Nombre d'échantillons SV par période réseau."""
+        if self.freq and self.freq > 0:
+            return max(8, round(SMP_PER_SEC / self.freq))
+        return 96
 
 
 class FaultDetector:
-    """Machine à états sain/défaut avec anti-rebond, émettant les fronts de tir."""
+    """Détecte les fronts de défaut sur la phase A, pour délimiter les tirs.
+
+    - **Onset** : détection *instantanée* du front montant (T0 précis), confirmée
+      sur `debounce` échantillons consécutifs au-dessus de `thr_high`.
+    - **Clear** : exige que le résidu reste sous `thr_low` pendant une période
+      réseau complète. Indispensable : une sinusoïde en défaut repasse par zéro à
+      chaque demi-cycle (résidu ~0 ponctuel) ; sans cette fenêtre, le défaut
+      « clignoterait » et fabriquerait un tir fantôme à chaque demi-cycle.
+    """
 
     def __init__(self, model: FaultModel, debounce: int = 2):
         self.model = model
-        self.debounce = debounce
+        self.debounce = max(1, debounce)
+        self.thr_high = model.thr_factor
+        self.thr_low = model.thr_factor * 0.5
+        self.window = model.cycle_samples()
         self.in_fault = False
-        self._fault_run = 0
-        self._healthy_run = 0
+        self._hi_run = 0
+        self._lo_run = 0
 
     def feed(self, s: SvSample) -> Optional[str]:
         """Retourne 'onset' (front sain->défaut), 'clear' (défaut->sain) ou None."""
-        if self.model.is_fault(s):
-            self._fault_run += 1
-            self._healthy_run = 0
-            if not self.in_fault and self._fault_run >= self.debounce:
-                self.in_fault = True
-                return "onset"
+        r = self.model.residual(s)
+        if not self.in_fault:
+            if r > self.thr_high:
+                self._hi_run += 1
+                if self._hi_run >= self.debounce:
+                    self.in_fault = True
+                    self._hi_run = 0
+                    self._lo_run = 0
+                    return "onset"
+            else:
+                self._hi_run = 0
         else:
-            self._healthy_run += 1
-            self._fault_run = 0
-            if self.in_fault and self._healthy_run >= self.debounce:
-                self.in_fault = False
-                return "clear"
+            if r < self.thr_low:
+                self._lo_run += 1
+                if self._lo_run >= self.window:
+                    self.in_fault = False
+                    self._lo_run = 0
+                    self._hi_run = 0
+                    return "clear"
+            else:
+                self._lo_run = 0
         return None
 
 
@@ -271,22 +296,43 @@ class Shot:
     t0: float                                   # instant du défaut (s, horloge noyau)
     trips: Dict[str, float] = field(default_factory=dict)   # gocbRef -> T1
     baseline_stnum: Dict[str, int] = field(default_factory=dict)
+    baseline_member: Dict[str, Any] = field(default_factory=dict)  # gocbRef -> valeur DA
+
+
+def _is_active(val: Any, baseline: Any) -> bool:
+    """Le membre de dataset choisi indique-t-il un trip ?
+
+    - Booléen : actif si True (cas usuel d'un DO de déclenchement, ex. Op.general).
+    - Autre type : actif s'il a changé par rapport à sa valeur avant défaut."""
+    if isinstance(val, BoolData):
+        return val.value is True
+    if baseline is None:
+        return True
+    return repr(val) != repr(baseline)
 
 
 class TripTracker:
-    """Apparie les fronts de défaut (T0) aux trips GOOSE (T1) par gocbRef."""
+    """Apparie les fronts de défaut (T0) aux trips GOOSE (T1) par gocbRef.
+
+    Le trip d'un VIED est, au choix :
+    - un membre précis du dataset (DO/DA) via `trip_members[gocbRef] = index`, ou
+    - à défaut, le premier changement de `stNum`.
+    """
 
     def __init__(
         self,
         gocb_refs: Optional[List[str]],
         trip_bool_index: Optional[int],
         trip_timeout: float,
+        trip_members: Optional[Dict[str, int]] = None,
     ):
         # gocb_refs explicites = les VIED attendus ; None => découverte automatique.
         self.expected_refs = gocb_refs
-        self.trip_bool_index = trip_bool_index
+        self.trip_bool_index = trip_bool_index          # index global par défaut
+        self.trip_members = trip_members or {}          # index par gocbRef
         self.trip_timeout = trip_timeout
-        self.last_stnum: Dict[str, int] = {}      # dernier stNum vu par gocbRef
+        self.last_stnum: Dict[str, int] = {}            # dernier stNum vu par gocbRef
+        self.last_all_data: Dict[str, list] = {}        # dernier allData vu par gocbRef
         self.seen_refs: List[str] = list(gocb_refs) if gocb_refs else []
         self.current: Optional[Shot] = None
         self.shots: List[Shot] = []
@@ -298,27 +344,40 @@ class TripTracker:
             return True
         return gocb_ref in self.expected_refs
 
+    def _member_index(self, gocb_ref: str) -> Optional[int]:
+        if gocb_ref in self.trip_members:
+            return self.trip_members[gocb_ref]
+        return self.trip_bool_index
+
     def on_goose(self, gocb_ref: str, st_num: int, all_data, t1: float) -> None:
         if not self._tracked(gocb_ref):
             return
         shot = self.current
         if shot is not None and gocb_ref not in shot.trips:
-            base = shot.baseline_stnum.get(gocb_ref, self.last_stnum.get(gocb_ref))
+            idx = self._member_index(gocb_ref)
             tripped = False
-            if self.trip_bool_index is not None:
-                idx = self.trip_bool_index
-                if 0 <= idx < len(all_data) and isinstance(all_data[idx], BoolData):
-                    tripped = bool(all_data[idx].value)
+            if idx is not None:
+                if 0 <= idx < len(all_data):
+                    tripped = _is_active(all_data[idx], shot.baseline_member.get(gocb_ref))
             else:
+                base = shot.baseline_stnum.get(gocb_ref, self.last_stnum.get(gocb_ref))
                 tripped = base is None or st_num != base
             if tripped and (t1 - shot.t0) <= self.trip_timeout:
                 shot.trips[gocb_ref] = t1
         self.last_stnum[gocb_ref] = st_num
+        self.last_all_data[gocb_ref] = all_data
 
     def on_fault_onset(self, index: int, t0: float) -> Shot:
-        # Fige l'état stNum de référence (avant trip) pour chaque VIED connu.
-        baseline = dict(self.last_stnum)
-        shot = Shot(index=index, t0=t0, baseline_stnum=baseline)
+        # Fige l'état de référence (stNum + valeur du DA de trip) avant le trip.
+        baseline_member: Dict[str, Any] = {}
+        for ref in (self.expected_refs or self.seen_refs):
+            idx = self._member_index(ref)
+            ad = self.last_all_data.get(ref)
+            if idx is not None and ad and 0 <= idx < len(ad):
+                baseline_member[ref] = ad[idx]
+        shot = Shot(index=index, t0=t0,
+                    baseline_stnum=dict(self.last_stnum),
+                    baseline_member=baseline_member)
         self.current = shot
         self.shots.append(shot)
         return shot
@@ -379,6 +438,7 @@ class RunConfig:
     num_shots: int
     duration: Optional[float]
     debounce: int
+    trip_members: Optional[Dict[str, int]] = None  # gocbRef -> index DO/DA de trip
 
 
 class MeasureSession:
@@ -390,11 +450,14 @@ class MeasureSession:
     def __init__(self, cfg: RunConfig, on_event=None):
         self.cfg = cfg
         self.detector = FaultDetector(cfg.model, debounce=cfg.debounce)
-        self.tracker = TripTracker(cfg.gocb_refs, cfg.trip_bool_index, cfg.trip_timeout)
+        self.tracker = TripTracker(cfg.gocb_refs, cfg.trip_bool_index,
+                                   cfg.trip_timeout, trip_members=cfg.trip_members)
         self.shot_index = 0
         self.on_event = on_event
         self.log: List[str] = []
         self.t_start: Optional[float] = None
+        # Buffer oscilloscope : derniers échantillons phase A (I, V) capturés.
+        self.scope: "collections.deque" = collections.deque(maxlen=1200)
 
     def _emit(self, msg: str) -> None:
         self.log.append(msg)
@@ -406,6 +469,7 @@ class MeasureSession:
             for s in parse_sv_phaseA(payload):
                 if self.cfg.svid_filter and s.svid != self.cfg.svid_filter:
                     continue
+                self.scope.append((s.ia, s.va))
                 ev = self.detector.feed(s)
                 if ev == "onset":
                     self.shot_index += 1
@@ -455,6 +519,16 @@ class MeasureSession:
         return (bool(self.cfg.num_shots)
                 and self.shot_index >= self.cfg.num_shots
                 and self.tracker.current is None)
+
+    def scope_snapshot(self, n: int = 480) -> dict:
+        """Derniers échantillons phase A pour l'oscilloscope live."""
+        data = list(self.scope)[-n:]
+        return {
+            "ia": [round(ia, 4) for ia, _ in data],
+            "va": [round(va, 4) for _, va in data],
+            "fault": self.detector.in_fault,
+            "shot": self.shot_index,
+        }
 
 
 def _capture_loop(cfg: RunConfig, session: MeasureSession,
@@ -508,6 +582,17 @@ def run_measurement(cfg: RunConfig, on_event=print) -> TripTracker:
 # --------------------------------------------------------------------------- #
 # Scan : GOOSE (et svID SV) transitant sur l'interface
 # --------------------------------------------------------------------------- #
+def _render_members(all_data: list) -> List[dict]:
+    """Décrit les membres (DO/DA) d'un dataset GOOSE pour le choix du trip.
+
+    Renvoie [{index, label, bool}] : label lisible (ex. 'bool(True)') et un
+    drapeau `bool` signalant les booléens, candidats naturels au déclenchement."""
+    out: List[dict] = []
+    for i, d in enumerate(all_data):
+        out.append({"index": i, "label": repr(d), "bool": isinstance(d, BoolData)})
+    return out
+
+
 def scan_traffic(iface: str, duration: float = 5.0,
                  stop_event: Optional[threading.Event] = None) -> dict:
     """Écoute `duration` secondes et inventorie les GOOSE et flux SV vus.
@@ -544,10 +629,13 @@ def scan_traffic(iface: str, duration: float = 5.0,
                     "conf_rev": pdu.conf_rev, "count": 0,
                     "st_num": pdu.st_num, "sq_num": pdu.sq_num,
                     "num_entries": pdu.num_dat_set_entries,
+                    "members": _render_members(pdu.all_data),
                 })
                 ent["count"] += 1
                 ent["st_num"] = pdu.st_num
                 ent["sq_num"] = pdu.sq_num
+                # Rafraîchit l'aperçu des membres (utile si une valeur a basculé).
+                ent["members"] = _render_members(pdu.all_data)
             elif etype == ETH_P_SV and len(payload) >= 8:
                 app_id = int.from_bytes(payload[0:2], "big")
                 for s in parse_sv_phaseA(payload):

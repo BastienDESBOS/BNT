@@ -87,13 +87,13 @@
       </div>
 
       <div class="card">
-        <h2>GOOSE / VIED</h2>
-        <label>gocbRef des VIED (un par ligne)</label>
-        <textarea id="gocb_refs" placeholder="VIED1/LLN0$GO$gcbTrip&#10;VIED2/LLN0$GO$gcbTrip"></textarea>
-        <div class="hint">Vide = auto-découverte (tous les VIED vus sont reportés).</div>
-        <div class="row3">
-          <div><label>APPID GOOSE</label><input id="goose_appid" list="dl-gappid" placeholder="0x3000"></div>
-          <div><label>Index booléen trip</label><input id="trip_bool_index" type="number" placeholder="stNum"></div>
+        <h2>VIED de déclenchement (2 max)</h2>
+        <div id="viedList"></div>
+        <button class="btn btn--ghost" id="addViedBtn" onclick="addVied()">+ Ajouter un VIED</button>
+        <div class="hint">Pour chaque VIED, choisissez le <b>DO/DA</b> qui porte le trip
+          (sinon : premier changement de <code>stNum</code>). Liste vide = auto-découverte.</div>
+        <div class="row">
+          <div><label>APPID GOOSE (filtre)</label><input id="goose_appid" list="dl-gappid" placeholder="tous"></div>
           <div><label>Timeout trip (ms)</label><input id="trip_timeout_ms" type="number" value="500"></div>
         </div>
         <div class="toolbar">
@@ -159,11 +159,24 @@
       </div>
 
       <div class="card">
+        <h2>Oscilloscope — signal SV capté (phase A)</h2>
+        <canvas id="scope" width="520" height="150" style="width:100%;height:150px;background:#11121a;border-radius:6px"></canvas>
+        <div class="hint"><span style="color:var(--accent)">■</span> courant I &nbsp;
+          <span style="color:var(--warn)">■</span> tension V &nbsp;—&nbsp; <span id="scopeState">en attente</span></div>
+      </div>
+
+      <div class="card">
         <h2>Résultats <span id="globalVerdict"></span></h2>
         <div id="resultsTable"><div class="hint">Aucun résultat pour l'instant.</div></div>
         <div class="toolbar">
           <button class="btn btn--ghost" onclick="exportCsv()">Exporter CSV</button>
         </div>
+      </div>
+
+      <div class="card">
+        <h2>Histogramme des latences</h2>
+        <canvas id="hist" width="520" height="180" style="width:100%;height:180px;background:#11121a;border-radius:6px"></canvas>
+        <div class="hint">Abscisse : latence (ms) — Ordonnée : nombre d'occurrences. Se remplit tir après tir.</div>
       </div>
 
       <div class="card">
@@ -174,6 +187,7 @@
   </div>
 
   <datalist id="dl-iface"></datalist>
+  <datalist id="dl-gocb"></datalist>
   <datalist id="dl-svid"></datalist>
   <datalist id="dl-gappid"></datalist>
   <datalist id="dl-svappid"></datalist>
@@ -184,23 +198,68 @@
 const $ = id => document.getElementById(id);
 const NUM = ["freq","phase","i_peak","v_peak","thr_factor","trip_timeout_ms","shots",
              "duration","max_latency_ms","debounce","fault_i_peak","fault_v_peak",
-             "fault_phase","fault_cycle","vlan_priority","trip_bool_index","vlan_id"];
+             "fault_phase","fault_cycle","vlan_priority","vlan_id"];
 const TXT = ["iface","svid","goose_appid","rt_sender","src_mac","dst_mac","sv_appid","sv_conf_rev"];
 let lastResults = null;
+let vieds = [];            // [{ref, member}]  (member = "" => stNum)
+window._members = {};      // gocbRef -> [{index,label,bool}] (issus du scan)
+
+// ---- VIED : liste gérée (max 2) avec choix du DO/DA de trip ----
+function memberOptions(ref, sel){
+  const info = window._members[ref];
+  let o = `<option value="" ${sel===""?"selected":""}>(incrément stNum)</option>`;
+  if(info && info.length){
+    info.forEach(m => { o += `<option value="${m.index}" ${String(sel)===String(m.index)?"selected":""}>`
+      + `#${m.index} ${esc(m.label)}${m.bool?" ✓":""}</option>`; });
+  } else {
+    for(let i=0;i<8;i++) o += `<option value="${i}" ${String(sel)===String(i)?"selected":""}>DA index ${i}</option>`;
+  }
+  return o;
+}
+function renderVieds(){
+  $("viedList").innerHTML = vieds.map((v,i) => `
+    <div class="row" style="margin-bottom:.4rem;align-items:end">
+      <div><label>gocbRef</label>
+        <input list="dl-gocb" value="${esc(v.ref)}" oninput="updateVied(${i},'ref',this.value)"></div>
+      <div style="display:flex;gap:.4rem;align-items:end">
+        <div style="flex:1"><label>DO/DA de trip</label>
+          <select id="viedSel${i}" onchange="updateVied(${i},'member',this.value)">${memberOptions(v.ref, v.member)}</select></div>
+        <button class="btn btn--ghost" onclick="removeVied(${i})" title="retirer">✕</button>
+      </div>
+    </div>`).join("");
+  $("addViedBtn").disabled = vieds.length >= 2;
+}
+function addVied(ref="", member=""){
+  if(vieds.length >= 2) return;
+  vieds.push({ref, member}); renderVieds();
+}
+function updateVied(i, key, val){
+  if(!vieds[i]) return;
+  vieds[i][key] = val;
+  if(key === "ref"){   // recharge les options DO/DA sans reconstruire l'input (garde le focus)
+    const sel = document.getElementById("viedSel"+i);
+    if(sel) sel.innerHTML = memberOptions(val, vieds[i].member);
+  }
+}
+function removeVied(i){ vieds.splice(i,1); renderVieds(); }
 
 function gatherConfig(){
   const c = {};
   TXT.forEach(k => c[k] = $(k).value.trim());
   NUM.forEach(k => { const v = $(k).value.trim(); if(v!=="") c[k] = Number(v); });
   c.generate = $("generate").checked;
-  c.gocb_refs = $("gocb_refs").value.split("\n").map(s=>s.trim()).filter(Boolean);
+  c.gocb_refs = vieds.map(v => v.ref.trim()).filter(Boolean);
+  c.trip_members = {};
+  vieds.forEach(v => { const r=v.ref.trim(); if(r && v.member!=="" && v.member!=null) c.trip_members[r] = Number(v.member); });
   return c;
 }
 function applyConfig(c){
   TXT.forEach(k => { if(c[k]!==undefined) $(k).value = c[k]; });
   NUM.forEach(k => { if(c[k]!==undefined && c[k]!==null) $(k).value = c[k]; });
   $("generate").checked = !!c.generate;
-  if(c.gocb_refs) $("gocb_refs").value = c.gocb_refs.join("\n");
+  const tm = c.trip_members || {};
+  vieds = (c.gocb_refs||[]).map(r => ({ref:r, member:(tm[r]!=null)?String(tm[r]):""}));
+  renderVieds();
 }
 
 async function api(method, path, body){
@@ -219,6 +278,7 @@ async function loadStore(){
   const s = await api("GET","/api/store");
   const h = s.history||{};
   fillDatalist("dl-iface", h.iface);
+  fillDatalist("dl-gocb", h.gocb_ref);
   fillDatalist("dl-svid", h.svid);
   fillDatalist("dl-gappid", h.goose_appid);
   fillDatalist("dl-svappid", h.sv_appid);
@@ -265,15 +325,18 @@ async function scan(){
   renderScan(r); loadStore();
 }
 function renderScan(r){
+  window._scanGoose = r.goose || [];
   let html = "";
   if(r.goose && r.goose.length){
-    html += `<table><tr><th>GOOSE gocbRef</th><th>goID</th><th>APPID</th><th>stNum</th><th>n</th></tr>`;
-    r.goose.forEach(g=>{
-      html += `<tr class="scanrow" onclick='addRef(${JSON.stringify(g.gocb_ref)}, ${g.app_id})'>
+    html += `<table><tr><th>GOOSE gocbRef</th><th>goID</th><th>APPID</th><th>entrées</th><th>stNum</th><th>n</th></tr>`;
+    r.goose.forEach((g,i)=>{
+      // mémorise les membres pour le sélecteur DO/DA
+      window._members[g.gocb_ref] = g.members || [];
+      html += `<tr class="scanrow" onclick='addViedFromScan(${i})' title="Ajouter comme VIED">
         <td>${esc(g.gocb_ref)}</td><td>${esc(g.go_id||"")}</td>
-        <td>0x${g.app_id.toString(16)}</td><td>${g.st_num}</td><td>${g.count}</td></tr>`;
+        <td>0x${g.app_id.toString(16)}</td><td>${g.num_entries}</td><td>${g.st_num}</td><td>${g.count}</td></tr>`;
     });
-    html += `</table><div class="hint">Cliquez une ligne GOOSE pour l'ajouter comme VIED (+ APPID).</div>`;
+    html += `</table><div class="hint">Cliquez une ligne GOOSE pour l'ajouter comme VIED (max 2) ; le DO/DA sera proposé.</div>`;
   } else html += `<div class="hint">Aucun GOOSE vu.</div>`;
   if(r.sv && r.sv.length){
     html += `<table style="margin-top:.6rem"><tr><th>SV svID</th><th>APPID</th><th>src</th><th>n</th></tr>`;
@@ -285,11 +348,15 @@ function renderScan(r){
   }
   $("scanOut").innerHTML = html;
 }
-function addRef(ref, appid){
-  const ta = $("gocb_refs");
-  const refs = ta.value.split("\n").map(s=>s.trim()).filter(Boolean);
-  if(!refs.includes(ref)){ refs.push(ref); ta.value = refs.join("\n"); }
-  if(appid!==undefined && !$("goose_appid").value) $("goose_appid").value = "0x"+appid.toString(16);
+function addViedFromScan(i){
+  const g = (window._scanGoose||[])[i]; if(!g) return;
+  if(vieds.some(v => v.ref === g.gocb_ref)) return;   // déjà présent
+  if(vieds.length >= 2){ $("formErr").textContent="2 VIED maximum (il n'y a que 2 vIED)."; return; }
+  window._members[g.gocb_ref] = g.members || [];
+  // pré-sélectionne le premier membre booléen s'il existe (candidat trip naturel)
+  const firstBool = (g.members||[]).find(m => m.bool);
+  addVied(g.gocb_ref, firstBool ? String(firstBool.index) : "");
+  if(!$("goose_appid").value) $("goose_appid").value = "0x"+g.app_id.toString(16);
 }
 function setSvid(s){ $("svid").value = s; }
 
@@ -298,6 +365,7 @@ function fmt(x){ return x==null ? "—" : x.toFixed(3); }
 
 function renderResults(res){
   lastResults = res;
+  drawHist(res);
   const gv = $("globalVerdict");
   if(!res || !res.n_shots){ gv.innerHTML=""; $("resultsTable").innerHTML='<div class="hint">Aucun résultat pour l\'instant.</div>'; return; }
   gv.innerHTML = res.global_pass ? '<span class="badge pass">PASS</span>' : '<span class="badge fail">FAIL</span>';
@@ -320,6 +388,48 @@ function exportCsv(){
   a.href = URL.createObjectURL(blob); a.download = "tnb_resultats.csv"; a.click();
 }
 
+const cssVar = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+function drawScope(d){
+  const cv=$("scope"), ctx=cv.getContext("2d"), W=cv.width, H=cv.height;
+  ctx.clearRect(0,0,W,H);
+  const ia=d.ia||[], va=d.va||[];
+  $("scopeState").textContent = d.fault ? ("⚠ DÉFAUT en cours (tir #"+d.shot+")")
+                                        : (ia.length ? "nominal" : "en attente");
+  if(d.fault){ ctx.fillStyle="rgba(247,118,142,.12)"; ctx.fillRect(0,0,W,H); }
+  ctx.strokeStyle="rgba(255,255,255,.12)"; ctx.beginPath(); ctx.moveTo(0,H/2); ctx.lineTo(W,H/2); ctx.stroke();
+  const plot=(arr,color)=>{
+    if(arr.length<2) return;
+    let mx=1e-9; arr.forEach(v=>{ if(Math.abs(v)>mx) mx=Math.abs(v); });
+    ctx.strokeStyle=color; ctx.lineWidth=1.3; ctx.beginPath();
+    arr.forEach((v,i)=>{ const x=i/(arr.length-1)*W, y=H/2-(v/mx)*(H/2-6); i?ctx.lineTo(x,y):ctx.moveTo(x,y); });
+    ctx.stroke();
+  };
+  plot(va, cssVar('--warn')||"#e0af68");
+  plot(ia, cssVar('--accent')||"#7aa2f7");
+}
+function drawHist(res){
+  const cv=$("hist"), ctx=cv.getContext("2d"), W=cv.width, H=cv.height, pad=24;
+  ctx.clearRect(0,0,W,H);
+  const lats=(res&&res.rows?res.rows:[]).map(r=>r.latency_ms).filter(v=>v!=null);
+  if(!lats.length){ ctx.fillStyle="#565f89"; ctx.font="12px system-ui"; ctx.fillText("en attente de tirs…",10,22); return; }
+  let mn=Math.min(...lats), mx=Math.max(...lats); if(mx-mn<1e-6){ mn-=0.5; mx+=0.5; }
+  const NB=Math.min(20,Math.max(6,Math.round(Math.sqrt(lats.length)*2)));
+  const bins=new Array(NB).fill(0);
+  lats.forEach(v=>{ let b=Math.floor((v-mn)/(mx-mn)*NB); b=Math.max(0,Math.min(NB-1,b)); bins[b]++; });
+  const cmax=Math.max(...bins), bw=(W-2*pad)/NB, acc=cssVar('--accent')||"#7aa2f7";
+  ctx.strokeStyle="rgba(255,255,255,.15)"; ctx.beginPath();
+  ctx.moveTo(pad,H-pad); ctx.lineTo(W-pad,H-pad); ctx.moveTo(pad,H-pad); ctx.lineTo(pad,8); ctx.stroke();
+  bins.forEach((c,i)=>{
+    const h=(c/cmax)*(H-pad-14);
+    ctx.fillStyle=acc; ctx.fillRect(pad+i*bw+1, H-pad-h, bw-2, h);
+    if(c){ ctx.fillStyle="#c0caf5"; ctx.font="10px system-ui"; ctx.textAlign="center"; ctx.fillText(c, pad+i*bw+bw/2, H-pad-h-2); }
+  });
+  ctx.fillStyle="#565f89"; ctx.font="10px system-ui";
+  ctx.textAlign="left"; ctx.fillText(mn.toFixed(1)+" ms", pad, H-8);
+  ctx.textAlign="right"; ctx.fillText(mx.toFixed(1)+" ms", W-pad, H-8);
+}
+async function pollScope(){ try{ drawScope(await api("GET","/api/scope")); }catch(e){} }
+
 let polling = false;
 async function poll(){
   if(polling) return; polling = true;
@@ -341,9 +451,12 @@ async function poll(){
   }finally{ polling = false; }
 }
 
+renderVieds();
 loadStore();
 poll();
+pollScope();
 setInterval(poll, 1000);
+setInterval(pollScope, 300);
 </script>
 </body>
 </html>

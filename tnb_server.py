@@ -141,6 +141,12 @@ def config_to_runconfig(c: Dict[str, Any]) -> tnb.RunConfig:
         thr_factor=float(c.get("thr_factor", 0.5)),
     )
     refs = [r for r in (c.get("gocb_refs") or []) if r]
+    members_raw = c.get("trip_members") or {}
+    trip_members = {}
+    for ref, idx in members_raw.items():
+        iv = _opt_int(idx)
+        if ref and iv is not None:
+            trip_members[ref] = iv
     return tnb.RunConfig(
         iface=c["iface"],
         model=model,
@@ -152,6 +158,7 @@ def config_to_runconfig(c: Dict[str, Any]) -> tnb.RunConfig:
         num_shots=int(c.get("shots", 0) or 0),
         duration=_opt_float(c.get("duration")),
         debounce=int(c.get("debounce", 2)),
+        trip_members=trip_members or None,
     )
 
 
@@ -273,6 +280,12 @@ class TnbServer:
                 return {"running": False, "shots": 0, "log": [], "results": None}
             return self.job.state()
 
+    def scope(self) -> Dict[str, Any]:
+        with self.job_lock:
+            if self.job is None:
+                return {"ia": [], "va": [], "fault": False, "shot": 0}
+            return self.job.session.scope_snapshot()
+
     def scan(self, iface: str, duration: float) -> Dict[str, Any]:
         if self.scanning:
             return {"ok": False, "error": "Scan déjà en cours."}
@@ -326,6 +339,8 @@ def make_handler(server: TnbServer):
                 self.wfile.write(html)
             elif path == "/api/state":
                 self._json(server.state())
+            elif path == "/api/scope":
+                self._json(server.scope())
             elif path == "/api/store":
                 self._json(server.store.snapshot())
             else:

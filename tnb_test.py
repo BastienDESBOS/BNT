@@ -139,14 +139,34 @@ def test_sv_parse_and_detect() -> None:
                 onset_seen = True
     check(onset_seen, "front sain->défaut détecté")
 
-    # Retour au sain : front 'clear'.
+    # Retour au sain : front 'clear' (exige un cycle complet sous le seuil bas).
     clear_seen = False
-    for k in range(30, 40):
+    for k in range(30, 120):
         payload = make_sv_payload("SV_1", k * 2, 50, 10, 100, 0, fault=False)
         for s in tnb.parse_sv_phaseA(payload):
             if det.feed(s) == "clear":
                 clear_seen = True
     check(clear_seen, "front défaut->sain détecté")
+
+
+def test_no_flapping_during_fault() -> None:
+    print("test_no_flapping_during_fault (pas de tir fantôme aux passages par zéro)")
+    model = tnb.FaultModel(freq=50, i_peak=10, v_peak=100, phase_deg=0, thr_factor=0.5)
+    det = tnb.FaultDetector(model, debounce=2)
+    onsets = clears = 0
+    # 50 paquets (~100 échantillons, plusieurs cycles) de défaut soutenu :
+    # la sinusoïde de défaut traverse zéro à chaque demi-cycle mais ne doit
+    # produire qu'UN onset et aucun clear intempestif.
+    for k in range(0, 50):
+        for s in tnb.parse_sv_phaseA(make_sv_payload("F", k * 2, 50, 10, 100, 0,
+                                                     fault=True, fault_i=200, fault_v=5)):
+            ev = det.feed(s)
+            if ev == "onset":
+                onsets += 1
+            elif ev == "clear":
+                clears += 1
+    check(onsets == 1, f"un seul onset sur tout le défaut (obtenu {onsets})")
+    check(clears == 0, f"aucun clear pendant le défaut soutenu (obtenu {clears})")
 
 
 def test_fault_to_zero() -> None:
@@ -285,9 +305,31 @@ def test_compute_stats_and_verdict() -> None:
     check(st2["global_pass"] is False, "verdict global FAIL si un VIED dépasse")
 
 
+def test_per_vied_member() -> None:
+    print("test_per_vied_member (DO/DA de trip choisi par VIED)")
+    refs = ["X", "Y"]
+    # X : trip sur le membre d'index 1 ; Y : pas de membre -> repli sur stNum.
+    tr = tnb.TripTracker(refs, trip_bool_index=None, trip_timeout=1.0,
+                         trip_members={"X": 1})
+    # Repos : établit les bases (membres et stNum).
+    tr.on_goose("X", 1, [BoolData(False), BoolData(False)], 0.0)
+    tr.on_goose("Y", 5, [BoolData(False)], 0.0)
+    tr.on_fault_onset(1, 1.0)
+    # X : index 0 bascule (non surveillé) -> pas de trip ; stNum inchangé.
+    tr.on_goose("X", 1, [BoolData(True), BoolData(False)], 1.003)
+    check("X" not in tr.shots[0].trips, "X : pas de trip si le DA surveillé reste False")
+    # X : index 1 (surveillé) passe True -> trip.
+    tr.on_goose("X", 1, [BoolData(True), BoolData(True)], 1.006)
+    check(abs((tr.shots[0].trips["X"] - 1.0) * 1e3 - 6.0) < 1e-3, "X : trip sur le DA d'index 1 à 6 ms")
+    # Y : sans membre configuré, trip au changement de stNum.
+    tr.on_goose("Y", 6, [BoolData(False)], 1.009)
+    check(abs((tr.shots[0].trips["Y"] - 1.0) * 1e3 - 9.0) < 1e-3, "Y : trip via incrément stNum à 9 ms")
+
+
 def main() -> int:
     for fn in (
         test_sv_parse_and_detect,
+        test_no_flapping_during_fault,
         test_fault_to_zero,
         test_goose_decode_and_trip,
         test_end_to_end_latency,
@@ -295,6 +337,7 @@ def main() -> int:
         test_bool_index_trigger,
         test_session_feed_e2e,
         test_compute_stats_and_verdict,
+        test_per_vied_member,
     ):
         fn()
     print()

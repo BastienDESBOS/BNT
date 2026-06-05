@@ -19,12 +19,25 @@ sudo python3 tnb_server.py --port 7060      # capture/émission => privilèges r
 # puis ouvrir http://localhost:7060
 ```
 
-La GUI permet de : configurer et **démarrer/arrêter** une campagne, suivre l'état
-**en direct** (tirs, journal, latences), voir les **résultats par VIED + verdict**,
-**exporter en CSV**, **enregistrer des profils** de paramètres, et **scanner** le
-trafic pour lister les GOOSE/SV transitant (clic = pré-remplissage du formulaire).
-Les valeurs déjà saisies (svID, gocbRef, MAC, APPID…) sont mémorisées et
-proposées en auto-complétion (`tnb_store.json`).
+La GUI permet de :
+- **démarrer / arrêter** une campagne et la suivre **en direct** (tirs, journal) ;
+- **oscilloscope** du signal SV capté (phase A I/V) en temps réel ;
+- **histogramme des latences** qui se remplit tir après tir (abscisse = latence,
+  ordonnée = occurrences) ;
+- **résultats par VIED + verdict** PASS/FAIL et **export CSV** ;
+- choisir, pour chacun des **2 VIED**, le **DO/DA** (membre du dataset) qui porte
+  le trip — le scan décode et liste les membres, et présélectionne un booléen ;
+- **scanner** le trafic pour lister les GOOSE/SV (clic = ajout d'un VIED ou du svID) ;
+- **profils** de paramètres et **auto-complétion** des valeurs déjà saisies
+  (svID, gocbRef, MAC, APPID…), persistés dans `tnb_store.json`.
+
+### Cadence des tirs
+
+Chaque **fenêtre de défaut** dans le flux SV = **un tir**, mesuré séquentiellement.
+La détection arme un tir sur le front montant (T0 précis) et ne le referme qu'après
+un cycle réseau complet revenu au sain — ce qui évite qu'une sinusoïde en défaut,
+qui repasse par zéro à chaque demi-cycle, ne génère des tirs fantômes. La cadence
+est donc imposée par `fault-cycle` du générateur (un tir tous les `2×fault_cycle` s).
 
 ## Installation
 
