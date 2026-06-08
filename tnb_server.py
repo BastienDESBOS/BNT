@@ -359,6 +359,18 @@ def make_handler(server: TnbServer):
                 self.send_header("Content-Length", str(len(html)))
                 self.end_headers()
                 self.wfile.write(html)
+            elif path == "/tnb_flow.gif":
+                gif = _HERE / "assets" / "tnb_flow.gif"
+                try:
+                    data = gif.read_bytes()
+                except OSError:
+                    self._json({"error": "gif introuvable"}, 404)
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", "image/gif")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
             elif path == "/api/state":
                 self._json(server.state())
             elif path == "/api/scope":

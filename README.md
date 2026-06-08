@@ -12,6 +12,16 @@ Mesure de latence d'une chaîne de protection IEC 61850 virtualisée (deux VIED)
   plateforme IEC 61850 fournissant le générateur SV (`rt_sender`) et le décodeur
   GOOSE pur (`goose61850`, `iec_data`) réutilisés ici.
 
+## Schéma animé
+
+![Animation TNB](assets/tnb_flow.gif)
+
+`assets/tnb_flow.gif` illustre le test : les **SV** montent de l'outil (TNB) vers le
+hardware, **SEAPATH**, puis les deux vIED **ABB** (rouge) et **Schneider** (vert) ;
+les **GOOSE de trip** redescendent jusqu'à l'outil. La latence mesurée = l'aller-retour.
+Il est aussi affiché en haut de l'interface web. Régénération (pur Python, sans
+dépendance) : `python3 assets/make_tnb_gif.py`.
+
 ## Interface web
 
 ```bash

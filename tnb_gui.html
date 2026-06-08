@@ -162,6 +162,17 @@
     <!-- ============ COLONNE DROITE : LIVE & RÉSULTATS ============ -->
     <div>
       <div class="card">
+        <details open>
+          <summary style="cursor:pointer;color:var(--accent);font-weight:600;font-size:1rem">Schéma : que fait le TNB ?</summary>
+          <img src="/tnb_flow.gif" alt="Animation TNB : les SV montent de l'outil vers le hardware, SEAPATH puis les vIED ABB et Schneider ; les GOOSE de trip redescendent jusqu'à l'outil"
+               style="display:block;max-width:340px;width:100%;margin:.7rem auto 0;border-radius:8px">
+          <div class="hint" style="text-align:center;margin-top:.4rem">
+            Injection SV (bleu) ↑ &nbsp;→&nbsp; trip GOOSE (orange) ↓ — la latence mesurée = l'aller-retour.
+          </div>
+        </details>
+      </div>
+
+      <div class="card">
         <h2>État</h2>
         <div class="stat">
           <div><span class="dot off" id="runDot"></span><span id="runState">à l'arrêt</span></div>
