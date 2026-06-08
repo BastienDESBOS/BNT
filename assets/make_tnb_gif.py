@@ -224,15 +224,23 @@ class BitW:
 
 
 def lzw(indices, mcs):
+    """LZW GIF à LARGEUR DE CODE FIXE (mcs+1 bits).
+
+    On n'augmente jamais la taille de code : dès que la table est pleine pour
+    cette largeur (next == 2^(mcs+1)), on émet un code Clear et on repart. Cela
+    élimine toute la logique d'agrandissement de code (la source n°1 de GIF
+    invalides) ; tout décodeur standard lit ce flux sans ambiguïté."""
     clear = 1 << mcs
     eoi = clear + 1
+    size = mcs + 1
+    cap = 1 << size            # tous les codes restent < cap (largeur fixe)
     out = BitW()
-
-    def reset():
-        return {(i,): i for i in range(clear)}, mcs + 1, clear + 2
-
-    table, size, nxt = reset()
     out.write(clear, size)
+
+    def fresh():
+        return {(i,): i for i in range(clear)}, clear + 2
+
+    table, nxt = fresh()
     pat = ()
     for idx in indices:
         np = pat + (idx,)
@@ -240,13 +248,11 @@ def lzw(indices, mcs):
             pat = np
         else:
             out.write(table[pat], size)
-            if nxt < 4096:
+            if nxt < cap:
                 table[np] = nxt; nxt += 1
-                if nxt == (1 << size) and size < 12:
-                    size += 1
             else:
-                out.write(clear, size)
-                table, size, nxt = reset()
+                out.write(clear, size)          # table pleine -> réinitialise
+                table, nxt = fresh()
             pat = (idx,)
     out.write(table[pat], size)
     out.write(eoi, size)
@@ -284,8 +290,8 @@ def write_gif(path, frames, delay_cs):
 
 
 def main():
-    nsv, ngo = 22, 22
-    delay = 5  # centisecondes -> 50 ms/frame
+    nsv, ngo = 18, 18
+    delay = 6  # centisecondes -> 60 ms/frame (boucle ~2,2 s)
     frames = [frame(i, nsv, ngo) for i in range(nsv + ngo)]
     import os
     out = os.path.join(os.path.dirname(__file__), "tnb_flow.gif")
