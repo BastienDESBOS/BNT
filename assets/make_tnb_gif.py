@@ -224,16 +224,16 @@ class BitW:
 
 
 def lzw(indices, mcs):
-    """LZW GIF à LARGEUR DE CODE FIXE (mcs+1 bits).
+    """LZW GIF standard (largeur de code variable).
 
-    On n'augmente jamais la taille de code : dès que la table est pleine pour
-    cette largeur (next == 2^(mcs+1)), on émet un code Clear et on repart. Cela
-    élimine toute la logique d'agrandissement de code (la source n°1 de GIF
-    invalides) ; tout décodeur standard lit ce flux sans ambiguïté."""
+    Règle d'agrandissement validée contre de vrais GIF : on passe à size+1 bits
+    quand le PROCHAIN code à attribuer atteint 2^size + 1 (et non 2^size — l'écart
+    d'une unité compense le décalage de remplissage de table côté décodeur, qui
+    augmente sa largeur quand sa table atteint 2^size). C'est ce calage précis qui
+    rend le flux lisible par les décodeurs standard (navigateurs, GitHub, Windows)."""
     clear = 1 << mcs
     eoi = clear + 1
     size = mcs + 1
-    cap = 1 << size            # tous les codes restent < cap (largeur fixe)
     out = BitW()
     out.write(clear, size)
 
@@ -248,11 +248,13 @@ def lzw(indices, mcs):
             pat = np
         else:
             out.write(table[pat], size)
-            if nxt < cap:
+            if nxt < 4096:
                 table[np] = nxt; nxt += 1
+                if nxt == (1 << size) + 1 and size < 12:
+                    size += 1
             else:
-                out.write(clear, size)          # table pleine -> réinitialise
-                table, nxt = fresh()
+                out.write(clear, size)
+                table, nxt = fresh(); size = mcs + 1
             pat = (idx,)
     out.write(table[pat], size)
     out.write(eoi, size)
