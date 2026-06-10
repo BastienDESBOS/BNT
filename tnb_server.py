@@ -166,8 +166,21 @@ def spawn_generator(c: Dict[str, Any]) -> Optional["subprocess.Popen"]:
     import subprocess
     if not c.get("generate") or not c.get("rt_sender"):
         return None
+    # Résout le binaire par rapport au dossier de tnb_server.py (et non au CWD du
+    # serveur), pour que ./sender/rt_sender fonctionne quel que soit le répertoire
+    # depuis lequel le serveur a été lancé.
+    rs = Path(c["rt_sender"])
+    if not rs.is_absolute():
+        cand = _HERE / rs
+        if cand.exists():
+            rs = cand
+    if not rs.exists():
+        raise FileNotFoundError(
+            f"rt_sender introuvable : '{c['rt_sender']}' (cherché aussi dans {_HERE}). "
+            f"Compilez-le : make -C {_HERE / 'sender'}"
+        )
     cmd = [
-        c["rt_sender"],
+        str(rs),
         "--freq", str(c.get("freq", 50)),
         "--i-peak", str(c.get("i_peak", 10)),
         "--v-peak", str(c.get("v_peak", 100)),
